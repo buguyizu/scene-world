@@ -1,11 +1,11 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref } from "vue";
+import World from "./pages/World.vue";
 import OrbitalScene from "./pages/OrbitalScene.vue";
-import Scene from "./pages/Scene.vue";
 
 const pages = [
-  { id: "orbital", label: "Orbital Resonance" },
-  { id: "scene", label: "New Scene" }
+  { id: "scene", label: "World" },
+  { id: "orbital", label: "Orbital Resonance" }
 ];
 
 const currentPage = ref(resolvePage(window.location.hash));
@@ -33,7 +33,7 @@ onBeforeUnmount(() => {
   <main class="app-shell">
     <header class="app-header">
       <a class="app-brand" href="#orbital">SCENE-WORLD</a>
-      <nav class="page-nav" aria-label="Scene pages">
+      <nav class="page-nav" aria-label="World pages">
         <a
           v-for="page in pages"
           :key="page.id"
@@ -47,6 +47,6 @@ onBeforeUnmount(() => {
     </header>
 
     <OrbitalScene v-if="currentPage === 'orbital'" />
-    <Scene v-else />
+    <World v-else />
   </main>
 </template>
