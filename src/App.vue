@@ -1,43 +1,49 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref } from "vue";
+import Life from "./pages/Life.vue";
 import World from "./pages/World.vue";
 import OrbitalScene from "./pages/OrbitalScene.vue";
 
 const pages = [
-  { id: "scene", label: "World" },
-  { id: "orbital", label: "Orbital Resonance" }
+  { id: "scene", label: "World", href: "/#scene" },
+  { id: "orbital", label: "Orbital Resonance", href: "/#orbital" },
+  { id: "life", label: "Life", href: "/#life" }
 ];
 
-const currentPage = ref(resolvePage(window.location.hash));
+const currentPage = ref(resolvePage(window.location.pathname, window.location.hash));
 
-function resolvePage(hash) {
+function resolvePage(pathname, hash) {
+  if (pathname.replace(/\/+$/, "") === "/life") return "life";
+
   const id = hash.replace(/^#/, "").trim().toLowerCase();
   return pages.some((page) => page.id === id) ? id : "orbital";
 }
 
-function syncPageFromHash() {
-  currentPage.value = resolvePage(window.location.hash);
+function syncPageFromLocation() {
+  currentPage.value = resolvePage(window.location.pathname, window.location.hash);
 }
 
 onMounted(() => {
-  syncPageFromHash();
-  window.addEventListener("hashchange", syncPageFromHash);
+  syncPageFromLocation();
+  window.addEventListener("hashchange", syncPageFromLocation);
+  window.addEventListener("popstate", syncPageFromLocation);
 });
 
 onBeforeUnmount(() => {
-  window.removeEventListener("hashchange", syncPageFromHash);
+  window.removeEventListener("hashchange", syncPageFromLocation);
+  window.removeEventListener("popstate", syncPageFromLocation);
 });
 </script>
 
 <template>
   <main class="app-shell">
     <header class="app-header">
-      <a class="app-brand" href="#orbital">SCENE-WORLD</a>
+      <a class="app-brand" href="/#orbital">SCENE-WORLD</a>
       <nav class="page-nav" aria-label="World pages">
         <a
           v-for="page in pages"
           :key="page.id"
-          :href="`#${page.id}`"
+          :href="page.href"
           :class="{ active: currentPage === page.id }"
           :aria-current="currentPage === page.id ? 'page' : undefined"
         >
@@ -47,6 +53,7 @@ onBeforeUnmount(() => {
     </header>
 
     <OrbitalScene v-if="currentPage === 'orbital'" />
-    <World v-else />
+    <World v-else-if="currentPage === 'scene'" />
+    <Life v-else />
   </main>
 </template>

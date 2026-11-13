@@ -5,27 +5,51 @@ import { TresCanvas } from "@tresjs/core";
 import { gsap } from "gsap";
 import {
   BufferGeometry,
+  CanvasTexture,
   CircleGeometry,
   Color,
   Float32BufferAttribute,
   InstancedMesh,
+  LinearFilter,
+  LineBasicMaterial,
+  LineSegments,
   Matrix4,
   MeshStandardMaterial,
-  Plane,
+  Points,
+  PointsMaterial,
   Quaternion,
   Raycaster,
+  Sphere,
   Vector2,
   Vector3
 } from "three";
 
 const cellCount = 1000;
-const sphereRadius = 1.42;
-const outerSphereRadius = sphereRadius * 1.5;
-const innerSphereRadius = sphereRadius * 0.5;
+const innerCoreRadius = 0.355;
+const outerSphereRadius = 3.195;
+const layerRadiusStep = (outerSphereRadius - innerCoreRadius) / 3;
+const innerSphereRadius = innerCoreRadius + layerRadiusStep;
+const sphereRadius = innerCoreRadius + layerRadiusStep * 2;
+const outerLayerPopulation = 1_000_000_000;
+const outerLayerPointCount = 1_000_000;
+const outerLayerInnerPointCount = 1_000;
+const outerLayerCircles = [1_000, 1_000_000].map((pointCount, index) => {
+  const cosAngle = 1 - 2 * pointCount / outerLayerPopulation;
+  return {
+    pointCount,
+    cosAngle,
+    radius: outerSphereRadius * Math.sqrt(1 - cosAngle ** 2),
+    z: outerSphereRadius * cosAngle,
+    tubeRadius: index === 0 ? 0.00005 : 0.00008
+  };
+});
+const overviewCameraDistance = 10.5;
+const overviewCameraPosition = [0, 0, overviewCameraDistance];
+const minimumZoomDistance = 0.05;
 const diskRadius = 0.076;
 const innerCircleRadius = diskRadius * (innerSphereRadius / sphereRadius);
 const subCircleCount = 1000;
-const wallCount = 100;
+const wallCount = 7;
 const wallChildIndices = Array.from({ length: subCircleCount }, (_, index) => index);
 for (let index = wallChildIndices.length - 1; index > 0; index -= 1) {
   const randomIndex = Math.floor(Math.random() * (index + 1));
@@ -43,10 +67,17 @@ const borderWidth = 0.0025;
 const circleSegments = 24;
 const sampleSubCircleIndex = wallChildIndices[0];
 const goldenAngle = Math.PI * (3 - Math.sqrt(5));
-const subCircleGoldenAngle = Math.PI * (3 - Math.sqrt(5));
-const diskPositions = new Float32Array(circleSegments * 9);
-const diskNormals = new Float32Array(circleSegments * 9);
-const borderPositions = [];
+const cellPositions = [];
+const cellNormals = [];
+const cellColorPositions = [];
+const cellColorRanges = [];
+const cellVertexCounts = [];
+const cellPolygons = [];
+const cellEdgeUseCounts = new Map();
+const cellPalette = ["#78b7ac", "#6eafa4", "#82c0b3", "#72aaa3"]
+  .map((color) => new Color(color));
+const selectedCellColor = new Color("#e1ad62");
+let previousFeaturedCellIndex = null;
 const innerCirclePositions = [];
 const wallColors = new Float32Array(wallCount * circleSegments * 18);
 const wallPalette = ["#42b49f", "#e0a45c", "#7399d4", "#d27f9a"]
@@ -56,13 +87,15 @@ const circleNormals = [];
 const circleTangents = [];
 const circleBitangents = [];
 const controlsRef = ref(null);
-const minDistance = ref(1.45);
-const showOuterSphere = ref(false);
+const minDistance = ref(minimumZoomDistance);
+const showFirstLayer = ref(true);
+const showSecondLayer = ref(true);
+const showThirdLayer = ref(true);
+const showFourthLayer = ref(true);
 const raycaster = new Raycaster();
 const pointer = new Vector2();
-const hitPlane = new Plane();
 const hitPoint = new Vector3();
-const hitOffset = new Vector3();
+const middleSurfaceSphere = new Sphere(new Vector3(), sphereRadius + diskOffset);
 let featuredCircleIndex = 0;
 let greatestFrontFacing = -Infinity;
 for (let index = 0; index < cellCount; index += 1) {
@@ -88,11 +121,74 @@ const subCircleMesh = new InstancedMesh(
   subCircleCount
 );
 subCircleMesh.renderOrder = 4;
+const outerLayerGeometry = new BufferGeometry();
+const outerLayerPositions = new Float32Array(outerLayerPointCount * 3);
+const innerCircleCosAngle = outerLayerCircles[0].cosAngle;
+const outerCircleCosAngle = outerLayerCircles[1].cosAngle;
+const outerRingPointCount = outerLayerPointCount - outerLayerInnerPointCount;
+const outerLayerCapArea = 2 * Math.PI * outerSphereRadius ** 2
+  * (1 - outerCircleCosAngle);
+const outerLayerCircleDiameter = Math.sqrt(
+  (2 * outerLayerCapArea) / (Math.sqrt(3) * outerLayerPointCount)
+) * 2.5;
+for (let index = 0; index < outerLayerInnerPointCount; index += 1) {
+  const cosAngle = 1 - ((index + 0.5) / outerLayerInnerPointCount)
+    * (1 - innerCircleCosAngle);
+  const ringRadius = Math.sqrt(1 - cosAngle ** 2);
+  const angle = index * goldenAngle;
+  const offset = index * 3;
+  outerLayerPositions[offset] = Math.cos(angle) * ringRadius * outerSphereRadius;
+  outerLayerPositions[offset + 1] = Math.sin(angle) * ringRadius * outerSphereRadius;
+  outerLayerPositions[offset + 2] = cosAngle * outerSphereRadius;
+}
+for (let index = 0; index < outerRingPointCount; index += 1) {
+  const cosAngle = innerCircleCosAngle
+    - ((index + 0.5) / outerRingPointCount) * (innerCircleCosAngle - outerCircleCosAngle);
+  const ringRadius = Math.sqrt(1 - cosAngle ** 2);
+  const angle = (index + outerLayerInnerPointCount) * goldenAngle;
+  const offset = (index + outerLayerInnerPointCount) * 3;
+  outerLayerPositions[offset] = Math.cos(angle) * ringRadius * outerSphereRadius;
+  outerLayerPositions[offset + 1] = Math.sin(angle) * ringRadius * outerSphereRadius;
+  outerLayerPositions[offset + 2] = cosAngle * outerSphereRadius;
+}
+outerLayerGeometry.setAttribute(
+  "position",
+  new Float32BufferAttribute(outerLayerPositions, 3)
+);
+outerLayerGeometry.computeBoundingSphere();
+const outerLayerCircleCanvas = document.createElement("canvas");
+outerLayerCircleCanvas.width = 32;
+outerLayerCircleCanvas.height = 32;
+const outerLayerCircleContext = outerLayerCircleCanvas.getContext("2d");
+if (!outerLayerCircleContext) {
+  throw new Error("Unable to create the outer-layer circle texture.");
+}
+outerLayerCircleContext.beginPath();
+outerLayerCircleContext.arc(16, 16, 14.5, 0, Math.PI * 2);
+outerLayerCircleContext.strokeStyle = "#ffffff";
+outerLayerCircleContext.lineWidth = 1;
+outerLayerCircleContext.stroke();
+const outerLayerCircleTexture = new CanvasTexture(outerLayerCircleCanvas);
+outerLayerCircleTexture.generateMipmaps = false;
+outerLayerCircleTexture.minFilter = LinearFilter;
+outerLayerCircleTexture.magFilter = LinearFilter;
+const outerLayerMaterial = new PointsMaterial({
+  color: "#4ac3a6",
+  map: outerLayerCircleTexture,
+  size: outerLayerCircleDiameter,
+  sizeAttenuation: true,
+  transparent: true,
+  opacity: 0.9,
+  alphaTest: 0.08
+});
+const outerLayerPoints = new Points(outerLayerGeometry, outerLayerMaterial);
+outerLayerPoints.renderOrder = 6;
 const orientationMatrix = new Matrix4();
 const instanceMatrix = new Matrix4();
 const instanceQuaternion = new Quaternion();
 const instancePosition = new Vector3();
 const instanceScale = new Vector3(subCircleRadius, subCircleRadius, subCircleRadius);
+let subCircleCenters = [];
 
 for (let index = 0; index < cellCount; index += 1) {
   const y = 1 - 2 * (index + 0.5) / cellCount;
@@ -136,33 +232,140 @@ for (let index = 0; index < cellCount; index += 1) {
       innerCirclePositions.push(point.x, point.y, point.z);
     }
 
-    if (segment % 2 === 1) continue;
-
-    const start = diskCenter.clone()
-      .addScaledVector(tangent, Math.cos(startAngle) * diskRadius)
-      .addScaledVector(bitangent, Math.sin(startAngle) * diskRadius);
-    const end = diskCenter.clone()
-      .addScaledVector(tangent, Math.cos(endAngle) * diskRadius)
-      .addScaledVector(bitangent, Math.sin(endAngle) * diskRadius);
-
-    const innerStart = diskCenter.clone()
-      .addScaledVector(tangent, Math.cos(startAngle) * (diskRadius - borderWidth))
-      .addScaledVector(bitangent, Math.sin(startAngle) * (diskRadius - borderWidth));
-    const innerEnd = diskCenter.clone()
-      .addScaledVector(tangent, Math.cos(endAngle) * (diskRadius - borderWidth))
-      .addScaledVector(bitangent, Math.sin(endAngle) * (diskRadius - borderWidth));
-
-    for (const point of [innerStart, start, end, innerStart, end, innerEnd]) {
-      borderPositions.push(point.x, point.y, point.z);
-    }
   }
 }
 
-const diskGeometry = new BufferGeometry();
-diskGeometry.setAttribute("position", new Float32BufferAttribute(diskPositions, 3));
-diskGeometry.setAttribute("normal", new Float32BufferAttribute(diskNormals, 3));
-const borderGeometry = new BufferGeometry();
-borderGeometry.setAttribute("position", new Float32BufferAttribute(borderPositions, 3));
+function clipCellPolygon(polygon, a, b, limit) {
+  if (polygon.length === 0) return polygon;
+  let minimum = Infinity;
+  let maximum = -Infinity;
+  for (const point of polygon) {
+    const value = a * point.u + b * point.v;
+    minimum = Math.min(minimum, value);
+    maximum = Math.max(maximum, value);
+  }
+  if (maximum <= limit + 1e-12) return polygon;
+  if (minimum > limit + 1e-12) return [];
+
+  const clipped = [];
+  let previous = polygon[polygon.length - 1];
+  let previousValue = a * previous.u + b * previous.v;
+  let previousInside = previousValue <= limit;
+  for (const current of polygon) {
+    const currentValue = a * current.u + b * current.v;
+    const currentInside = currentValue <= limit;
+    if (currentInside !== previousInside) {
+      const amount = (limit - previousValue) / (currentValue - previousValue);
+      clipped.push({
+        u: previous.u + (current.u - previous.u) * amount,
+        v: previous.v + (current.v - previous.v) * amount
+      });
+    }
+    if (currentInside) clipped.push(current);
+    previous = current;
+    previousValue = currentValue;
+    previousInside = currentInside;
+  }
+  return clipped;
+}
+
+const cellVertexCache = new Map();
+let nextCellVertexId = 0;
+function getCellVertex(normal, tangent, bitangent, point) {
+  const position = normal.clone()
+    .addScaledVector(tangent, point.u)
+    .addScaledVector(bitangent, point.v)
+    .normalize()
+    .multiplyScalar(sphereRadius + diskOffset);
+  const snapped = [position.x, position.y, position.z]
+    .map((value) => Math.round(value * 1e8) / 1e8);
+  const key = snapped.join(",");
+  let vertex = cellVertexCache.get(key);
+  if (!vertex) {
+    vertex = {
+      id: nextCellVertexId,
+      position: new Vector3(...snapped)
+    };
+    nextCellVertexId += 1;
+    cellVertexCache.set(key, vertex);
+  }
+  return vertex;
+}
+
+const cellBoundaryPositions = [];
+const seenCellEdges = new Set();
+for (let index = 0; index < cellCount; index += 1) {
+  const normal = circleNormals[index];
+  const tangent = circleTangents[index];
+  const bitangent = circleBitangents[index];
+  let polygon = [
+    { u: -1, v: -1 },
+    { u: 1, v: -1 },
+    { u: 1, v: 1 },
+    { u: -1, v: 1 }
+  ];
+
+  for (let otherIndex = 0; otherIndex < cellCount && polygon.length > 0; otherIndex += 1) {
+    if (otherIndex === index) continue;
+    const otherNormal = circleNormals[otherIndex];
+    polygon = clipCellPolygon(
+      polygon,
+      otherNormal.dot(tangent),
+      otherNormal.dot(bitangent),
+      1 - otherNormal.dot(normal)
+    );
+  }
+
+  const vertices = polygon.map((point) => getCellVertex(normal, tangent, bitangent, point));
+  if (vertices.length < 3) throw new Error(`Spherical cell ${index} has fewer than three vertices`);
+  cellVertexCounts.push(vertices.length);
+  cellPolygons.push(vertices.map((vertex) => vertex.position));
+  const color = index === featuredCircleIndex ? selectedCellColor : cellPalette[index % cellPalette.length];
+  const colorStart = cellColorPositions.length;
+  const center = circleCenters[index];
+
+  for (let vertexIndex = 0; vertexIndex < vertices.length; vertexIndex += 1) {
+    const first = vertices[vertexIndex];
+    const second = vertices[(vertexIndex + 1) % vertices.length];
+    for (const point of [center, first.position, second.position]) {
+      cellPositions.push(point.x, point.y, point.z);
+      const pointNormal = point.clone().normalize();
+      cellNormals.push(pointNormal.x, pointNormal.y, pointNormal.z);
+      cellColorPositions.push(color.r, color.g, color.b);
+    }
+
+    const edgeIds = [first.id, second.id].sort((left, right) => left - right);
+    const edgeKey = `${edgeIds[0]}:${edgeIds[1]}`;
+    cellEdgeUseCounts.set(edgeKey, (cellEdgeUseCounts.get(edgeKey) ?? 0) + 1);
+    if (!seenCellEdges.has(edgeKey)) {
+      seenCellEdges.add(edgeKey);
+      cellBoundaryPositions.push(
+        first.position.x, first.position.y, first.position.z,
+        second.position.x, second.position.y, second.position.z
+      );
+    }
+  }
+  cellColorRanges.push({ start: colorStart, count: cellColorPositions.length - colorStart });
+}
+
+const cellGeometry = new BufferGeometry();
+cellGeometry.setAttribute("position", new Float32BufferAttribute(cellPositions, 3));
+cellGeometry.setAttribute("normal", new Float32BufferAttribute(cellNormals, 3));
+cellGeometry.setAttribute("color", new Float32BufferAttribute(cellColorPositions, 3));
+cellGeometry.computeBoundingSphere();
+const cellBoundaryGeometry = new BufferGeometry();
+cellBoundaryGeometry.setAttribute(
+  "position",
+  new Float32BufferAttribute(cellBoundaryPositions, 3)
+);
+const cellBoundaryMaterial = new LineBasicMaterial({
+  color: "#091b20",
+  transparent: true,
+  opacity: 0.82,
+  depthWrite: false
+});
+const cellBoundaryMesh = new LineSegments(cellBoundaryGeometry, cellBoundaryMaterial);
+cellBoundaryMesh.renderOrder = 3;
 const innerCircleGeometry = new BufferGeometry();
 innerCircleGeometry.setAttribute("position", new Float32BufferAttribute(innerCirclePositions, 3));
 const wallGeometry = new BufferGeometry();
@@ -186,13 +389,7 @@ function updateWalls(parentIndex) {
 
   for (let wallIndex = 0; wallIndex < wallCount; wallIndex += 1) {
     const childIndex = wallChildIndices[wallIndex];
-    const childRadialDistance = (diskRadius - subCircleRadius)
-      * Math.sqrt((childIndex + 0.5) / subCircleCount);
-    const childAngle = childIndex * subCircleGoldenAngle;
-    const middleWallCenter = circleCenters[parentIndex].clone()
-      .addScaledVector(tangent, Math.cos(childAngle) * childRadialDistance)
-      .addScaledVector(bitangent, Math.sin(childAngle) * childRadialDistance)
-      .addScaledVector(normal, subCircleOffset);
+    const middleWallCenter = subCircleCenters[childIndex];
 
     if (childIndex === sampleSubCircleIndex) {
       focusedPair = { innerWallCenter, middleWallCenter };
@@ -229,49 +426,65 @@ function updateWalls(parentIndex) {
   return focusedPair;
 }
 
+function setCellColor(index, color) {
+  const range = cellColorRanges[index];
+  const colors = cellGeometry.attributes.color.array;
+  for (let offset = range.start; offset < range.start + range.count; offset += 3) {
+    colors[offset] = color.r;
+    colors[offset + 1] = color.g;
+    colors[offset + 2] = color.b;
+  }
+}
+
 function updateFeaturedCircle(index) {
   featuredCircleIndex = index;
   const center = circleCenters[index];
   const normal = circleNormals[index];
   const tangent = circleTangents[index];
   const bitangent = circleBitangents[index];
-  let offset = 0;
-
-  for (let segment = 0; segment < circleSegments; segment += 1) {
-    const startAngle = (segment / circleSegments) * Math.PI * 2;
-    const endAngle = ((segment + 1) / circleSegments) * Math.PI * 2;
-    const start = center.clone()
-      .addScaledVector(tangent, Math.cos(startAngle) * diskRadius)
-      .addScaledVector(bitangent, Math.sin(startAngle) * diskRadius);
-    const end = center.clone()
-      .addScaledVector(tangent, Math.cos(endAngle) * diskRadius)
-      .addScaledVector(bitangent, Math.sin(endAngle) * diskRadius);
-
-    for (const point of [center, start, end]) {
-      diskPositions[offset] = point.x;
-      diskPositions[offset + 1] = point.y;
-      diskPositions[offset + 2] = point.z;
-      diskNormals[offset] = normal.x;
-      diskNormals[offset + 1] = normal.y;
-      diskNormals[offset + 2] = normal.z;
-      offset += 3;
-    }
+  if (previousFeaturedCellIndex !== null) {
+    setCellColor(previousFeaturedCellIndex, cellPalette[previousFeaturedCellIndex % cellPalette.length]);
   }
+  setCellColor(index, selectedCellColor);
+  cellGeometry.attributes.color.needsUpdate = true;
+  previousFeaturedCellIndex = index;
 
-  diskGeometry.attributes.position.needsUpdate = true;
-  diskGeometry.attributes.normal.needsUpdate = true;
-  diskGeometry.computeBoundingSphere();
+  const polygon = cellPolygons[index].map((vertex) => {
+    const direction = vertex.clone().normalize();
+    const projection = normal.dot(direction);
+    return {
+      u: (tangent.dot(direction) / projection) * (sphereRadius + diskOffset),
+      v: (bitangent.dot(direction) / projection) * (sphereRadius + diskOffset)
+    };
+  });
+  const triangles = [];
+  let totalArea = 0;
+  for (let vertexIndex = 0; vertexIndex < polygon.length; vertexIndex += 1) {
+    const first = polygon[vertexIndex];
+    const second = polygon[(vertexIndex + 1) % polygon.length];
+    const area = Math.abs(first.u * second.v - first.v * second.u) / 2;
+    totalArea += area;
+    triangles.push({ first, second, cumulativeArea: totalArea });
+  }
 
   orientationMatrix.makeBasis(tangent, bitangent, normal);
   instanceQuaternion.setFromRotationMatrix(orientationMatrix);
+  subCircleCenters = [];
   for (let subCircleIndex = 0; subCircleIndex < subCircleCount; subCircleIndex += 1) {
-    const radialDistance = (diskRadius - subCircleRadius)
-      * Math.sqrt((subCircleIndex + 0.5) / subCircleCount);
-    const subCircleAngle = subCircleIndex * subCircleGoldenAngle;
+    const triangleAreaTarget = radicalInverse(subCircleIndex + 1, 2) * totalArea;
+    const triangle = triangles.find((item) => item.cumulativeArea >= triangleAreaTarget);
+    const radialSample = Math.sqrt(radicalInverse(subCircleIndex + 1, 3));
+    const edgeSample = radicalInverse(subCircleIndex + 1, 5);
+    const margin = 0.96;
+    const u = margin * radialSample
+      * ((1 - edgeSample) * triangle.first.u + edgeSample * triangle.second.u);
+    const v = margin * radialSample
+      * ((1 - edgeSample) * triangle.first.v + edgeSample * triangle.second.v);
     instancePosition.copy(center)
-      .addScaledVector(tangent, Math.cos(subCircleAngle) * radialDistance)
-      .addScaledVector(bitangent, Math.sin(subCircleAngle) * radialDistance)
+      .addScaledVector(tangent, u)
+      .addScaledVector(bitangent, v)
       .addScaledVector(normal, subCircleOffset);
+    subCircleCenters.push(instancePosition.clone());
     instanceMatrix.compose(instancePosition, instanceQuaternion, instanceScale);
     subCircleMesh.setMatrixAt(subCircleIndex, instanceMatrix);
   }
@@ -279,6 +492,18 @@ function updateFeaturedCircle(index) {
   subCircleMesh.computeBoundingSphere();
   return updateWalls(index);
 }
+
+function radicalInverse(index, base) {
+  let result = 0;
+  let fraction = 1 / base;
+  while (index > 0) {
+    result += (index % base) * fraction;
+    index = Math.floor(index / base);
+    fraction /= base;
+  }
+  return result;
+}
+
 updateFeaturedCircle(featuredCircleIndex);
 
 function getOrbitControls() {
@@ -310,7 +535,7 @@ function animateFocus(controls, target, position, restoreOverview = false) {
     onUpdate: () => controls.update(),
     onComplete: () => {
       controls.update();
-      if (restoreOverview) minDistance.value = 1.45;
+      if (restoreOverview) minDistance.value = minimumZoomDistance;
     }
   });
 }
@@ -332,7 +557,12 @@ function focusCircle(index, controls, aspect) {
 
 function resetFocus(controls) {
   updateFeaturedCircle(initialFeaturedCircleIndex);
-  animateFocus(controls, new Vector3(0, 0, 0), new Vector3(0, 0, 4.5), true);
+  animateFocus(
+    controls,
+    new Vector3(0, 0, 0),
+    new Vector3(0, 0, overviewCameraDistance),
+    true
+  );
 }
 
 function handleDoubleClick(event) {
@@ -346,23 +576,23 @@ function handleDoubleClick(event) {
     -((event.clientY - bounds.top) / bounds.height) * 2 + 1
   );
   raycaster.setFromCamera(pointer, controls.object);
-
-  let selectedIndex = -1;
-  let nearestDistance = Infinity;
-  for (let index = 0; index < cellCount; index += 1) {
-    hitPlane.setFromNormalAndCoplanarPoint(circleNormals[index], circleCenters[index]);
-    if (!raycaster.ray.intersectPlane(hitPlane, hitPoint)) continue;
-    const distance = hitPoint.distanceToSquared(raycaster.ray.origin);
-    if (distance >= nearestDistance) continue;
-    hitOffset.subVectors(hitPoint, circleCenters[index]);
-    if (hitOffset.lengthSq() > diskRadius * diskRadius) continue;
-    selectedIndex = index;
-    nearestDistance = distance;
-  }
-
-  if (selectedIndex < 0) {
+  if (
+    !showThirdLayer.value
+    || !raycaster.ray.intersectSphere(middleSurfaceSphere, hitPoint)
+  ) {
     resetFocus(controls);
     return;
+  }
+
+  const hitNormal = hitPoint.normalize();
+  let selectedIndex = 0;
+  let greatestAlignment = -Infinity;
+  for (let index = 0; index < cellCount; index += 1) {
+    const alignment = circleNormals[index].dot(hitNormal);
+    if (alignment > greatestAlignment) {
+      greatestAlignment = alignment;
+      selectedIndex = index;
+    }
   }
 
   focusCircle(selectedIndex, controls, bounds.width / bounds.height);
@@ -374,8 +604,12 @@ onBeforeUnmount(() => {
     gsap.killTweensOf(controls.object.position);
     gsap.killTweensOf(controls.target);
   }
-  diskGeometry.dispose();
-  borderGeometry.dispose();
+  cellGeometry.dispose();
+  cellBoundaryGeometry.dispose();
+  cellBoundaryMaterial.dispose();
+  outerLayerGeometry.dispose();
+  outerLayerCircleTexture.dispose();
+  outerLayerMaterial.dispose();
   innerCircleGeometry.dispose();
   wallGeometry.dispose();
   subCircleGeometry.dispose();
@@ -385,18 +619,35 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="scene-page">
+    <div class="sphere-controls" role="group" aria-label="Layer visibility">
+      <label class="shell-toggle">
+        <input v-model="showFirstLayer" type="checkbox" role="switch" />
+        <span>Layer 1</span>
+      </label>
+      <label class="shell-toggle">
+        <input v-model="showSecondLayer" type="checkbox" role="switch" />
+        <span>Layer 2</span>
+      </label>
+      <label class="shell-toggle">
+        <input v-model="showThirdLayer" type="checkbox" role="switch" />
+        <span>Layer 3</span>
+      </label>
+      <label
+        class="shell-toggle"
+        title="The large ring contains 1,000,000 generated points; the small ring contains 1,000 of them."
+      >
+        <input v-model="showFourthLayer" type="checkbox" role="switch" />
+        <span>Layer 4</span>
+      </label>
+    </div>
     <div class="scene-heading">
       <div>
         <p class="scene-eyebrow">SPHERICAL GRID / 001</p>
         <h2>Great-thousand-fold world</h2>
-        <p class="scene-description">One sphere circle contains 1,000 smaller circles; the others are empty.</p>
+        <p class="scene-description">Layer 1 is the central sphere; Layer 2 has the inner circles; Layer 3 has 1,000 polygon cells; Layer 4 shows 1M points inside the large ring, including 1K inside the small ring.</p>
       </div>
       <div class="scene-heading-meta">
-        <label class="shell-toggle">
-          <input v-model="showOuterSphere" type="checkbox" role="switch" />
-          <span>Outer sphere</span>
-        </label>
-        <div class="cell-counter"><strong>100</strong><span>RANDOM WALLS</span></div>
+        <div class="cell-counter"><strong>7</strong><span>RANDOM WALLS</span></div>
       </div>
     </div>
 
@@ -406,37 +657,62 @@ onBeforeUnmount(() => {
       @dblclick="handleDoubleClick"
     >
       <TresCanvas class="scene-canvas" :dpr="[1, 1.75]" clear-color="#091923">
-        <TresPerspectiveCamera :position="[0, 0, 4.5]" :fov="38" :near="0.01" :far="40" />
+        <TresPerspectiveCamera
+          :position="overviewCameraPosition"
+          :fov="38"
+          :near="0.001"
+          :far="40"
+        />
         <TresAmbientLight :intensity="1.15" />
         <TresDirectionalLight :position="[3, 4, 5]" :intensity="2.2" color="#e4fff8" />
         <TresDirectionalLight :position="[-4, -2, -3]" :intensity="1.1" color="#58b7ad" />
 
-        <TresMesh :render-order="1">
-          <TresSphereGeometry :args="[sphereRadius, 96, 64]" />
+        <template v-if="showThirdLayer">
+          <TresMesh :render-order="1">
+            <TresSphereGeometry :args="[sphereRadius, 96, 64]" />
+            <TresMeshPhysicalMaterial
+              color="#80b9b5"
+              :transparent="true"
+              :opacity="0.3"
+              :depth-write="false"
+              :metalness="0.24"
+              :roughness="0.28"
+            />
+          </TresMesh>
+          <TresMesh :geometry="cellGeometry" :render-order="2">
+            <TresMeshBasicMaterial
+              :vertex-colors="true"
+              :side="2"
+              :transparent="true"
+              :opacity="0"
+              :depth-write="false"
+            />
+          </TresMesh>
+          <primitive :object="cellBoundaryMesh" />
+          <primitive :object="subCircleMesh" />
+          <TresMesh :geometry="wallGeometry" :render-order="4.75">
+            <TresMeshBasicMaterial
+              color="#ffffff"
+              :side="2"
+              :transparent="true"
+              :opacity="0.36"
+              :depth-write="false"
+              :vertex-colors="true"
+            />
+          </TresMesh>
+        </template>
+        <TresMesh v-if="showFirstLayer" :render-order="0.5">
+          <TresSphereGeometry :args="[innerCoreRadius, 48, 32]" />
           <TresMeshPhysicalMaterial
-            color="#80b9b5"
+            color="#4b9c91"
             :transparent="true"
-            :opacity="0.3"
+            :opacity="0.16"
             :depth-write="false"
-            :metalness="0.24"
-            :roughness="0.28"
+            :metalness="0.16"
+            :roughness="0.3"
           />
         </TresMesh>
-        <TresMesh :geometry="diskGeometry" :render-order="2">
-          <TresMeshStandardMaterial
-            color="#9be7d5"
-            :transparent="true"
-            :opacity="1"
-            :depth-write="true"
-            :metalness="0.38"
-            :roughness="0.26"
-          />
-        </TresMesh>
-        <TresMesh :geometry="borderGeometry" :render-order="3">
-          <TresMeshBasicMaterial color="#091b20" :side="2" :transparent="true" :opacity="0.82" />
-        </TresMesh>
-        <primitive :object="subCircleMesh" />
-        <TresMesh :geometry="innerCircleGeometry" :render-order="4.5">
+        <TresMesh v-if="showSecondLayer" :geometry="innerCircleGeometry" :render-order="4.5">
           <TresMeshBasicMaterial
             color="#a5e6d0"
             :side="2"
@@ -444,34 +720,40 @@ onBeforeUnmount(() => {
             :opacity="0.85"
           />
         </TresMesh>
-        <TresMesh :geometry="wallGeometry" :render-order="4.75">
+        <TresMesh v-if="showFourthLayer" :render-order="5.9">
+          <TresSphereGeometry :args="[outerSphereRadius, 96, 64]" />
           <TresMeshBasicMaterial
-            color="#ffffff"
+            color="#477d79"
             :side="2"
             :transparent="true"
-            :opacity="0.08"
-            :depth-write="false"
-            :vertex-colors="true"
-          />
-        </TresMesh>
-        <TresMesh :render-order="5" :visible="showOuterSphere">
-          <TresSphereGeometry :args="[outerSphereRadius, 64, 48]" />
-          <TresMeshBasicMaterial
-            color="#75bcb3"
-            :wireframe="true"
-            :transparent="true"
-            :opacity="0.2"
+            :opacity="0.025"
             :depth-write="false"
           />
         </TresMesh>
+        <primitive v-if="showFourthLayer" :object="outerLayerPoints" />
+        <template v-if="showFourthLayer">
+          <TresMesh
+            v-for="circle in outerLayerCircles"
+            :key="circle.pointCount"
+            :position="[0, 0, circle.z]"
+            :render-order="6.5"
+          >
+            <TresTorusGeometry :args="[circle.radius, circle.tubeRadius, 8, 96]" />
+            <TresMeshBasicMaterial
+              :color="circle.pointCount === 1000 ? '#ffe2a3' : '#f5a85c'"
+              :side="2"
+            />
+          </TresMesh>
+        </template>
 
         <OrbitControls
           ref="controlsRef"
           make-default
           :enable-damping="true"
           :damping-factor="0.06"
+          :zoom-speed="0.45"
           :min-distance="minDistance"
-          :max-distance="8"
+          :max-distance="14"
         />
       </TresCanvas>
       <div class="scene-hint">DRAG TO ROTATE <span>·</span> SCROLL TO ZOOM</div>
@@ -520,6 +802,15 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 22px;
   flex-shrink: 0;
+}
+
+.sphere-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px 22px;
+  margin: 0 4px 14px;
 }
 
 .shell-toggle {
@@ -632,6 +923,10 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 640px) {
+  .sphere-controls {
+    justify-content: flex-start;
+  }
+
   .scene-heading {
     align-items: flex-start;
   }
