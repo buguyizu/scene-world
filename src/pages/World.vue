@@ -6,18 +6,11 @@ import { gsap } from "gsap";
 import {
   BufferGeometry,
   CanvasTexture,
-  CircleGeometry,
   Color,
   Float32BufferAttribute,
-  InstancedMesh,
   LinearFilter,
-  LineBasicMaterial,
-  LineSegments,
-  Matrix4,
-  MeshStandardMaterial,
   Points,
   PointsMaterial,
-  Quaternion,
   Raycaster,
   Sphere,
   Vector2,
@@ -30,6 +23,14 @@ const outerSphereRadius = 3.195;
 const layerRadiusStep = (outerSphereRadius - innerCoreRadius) / 3;
 const innerSphereRadius = innerCoreRadius + layerRadiusStep;
 const sphereRadius = innerCoreRadius + layerRadiusStep * 2;
+const sphereLayerPointCount = 1_000_000;
+const sphereLayerRingPointCount = 1_000;
+const sphereLayerRingCosAngle = 1 - 2 * sphereLayerRingPointCount / sphereLayerPointCount;
+const sphereLayerRing = {
+  radius: sphereRadius * Math.sqrt(1 - sphereLayerRingCosAngle ** 2),
+  y: sphereRadius * sphereLayerRingCosAngle,
+  tubeRadius: 0.0015
+};
 const outerLayerPopulation = 1_000_000_000;
 const outerLayerPointCount = 1_000_000;
 const outerLayerInnerPointCount = 1_000;
@@ -48,38 +49,27 @@ const overviewCameraPosition = [0, 0, overviewCameraDistance];
 const minimumZoomDistance = 0.05;
 const diskRadius = 0.076;
 const innerCircleRadius = diskRadius * (innerSphereRadius / sphereRadius);
-const subCircleCount = 1000;
+const wallTargetSampleCount = 1000;
 const wallCount = 7;
-const wallChildIndices = Array.from({ length: subCircleCount }, (_, index) => index);
-for (let index = wallChildIndices.length - 1; index > 0; index -= 1) {
+const wallTargetSampleIndices = Array.from({ length: wallTargetSampleCount }, (_, index) => index);
+for (let index = wallTargetSampleIndices.length - 1; index > 0; index -= 1) {
   const randomIndex = Math.floor(Math.random() * (index + 1));
-  [wallChildIndices[index], wallChildIndices[randomIndex]] = [
-    wallChildIndices[randomIndex],
-    wallChildIndices[index]
+  [wallTargetSampleIndices[index], wallTargetSampleIndices[randomIndex]] = [
+    wallTargetSampleIndices[randomIndex],
+    wallTargetSampleIndices[index]
   ];
 }
-wallChildIndices.length = wallCount;
-wallChildIndices.sort((left, right) => left - right);
-const subCircleRadius = diskRadius / 37;
-const subCircleOffset = 0.0015;
+wallTargetSampleIndices.length = wallCount;
+wallTargetSampleIndices.sort((left, right) => left - right);
+const sampleWallTargetIndex = wallTargetSampleIndices[0];
+const wallTipOffset = 0.0015;
 const diskOffset = 0.008;
 const borderWidth = 0.0025;
 const circleSegments = 24;
-const sampleSubCircleIndex = wallChildIndices[0];
 const goldenAngle = Math.PI * (3 - Math.sqrt(5));
-const cellPositions = [];
-const cellNormals = [];
-const cellColorPositions = [];
-const cellColorRanges = [];
-const cellVertexCounts = [];
 const cellPolygons = [];
-const cellEdgeUseCounts = new Map();
-const cellPalette = ["#78b7ac", "#6eafa4", "#82c0b3", "#72aaa3"]
-  .map((color) => new Color(color));
-const selectedCellColor = new Color("#e1ad62");
-let previousFeaturedCellIndex = null;
 const innerCirclePositions = [];
-const wallColors = new Float32Array(wallCount * circleSegments * 18);
+const wallColors = new Float32Array(wallCount * circleSegments * 9);
 const wallPalette = ["#42b49f", "#e0a45c", "#7399d4", "#d27f9a"]
   .map((color) => new Color(color));
 const circleCenters = [];
@@ -109,18 +99,26 @@ for (let index = 0; index < cellCount; index += 1) {
 }
 const initialFeaturedCircleIndex = featuredCircleIndex;
 
-const subCircleGeometry = new CircleGeometry(1, 8);
-const subCircleMaterial = new MeshStandardMaterial({
-  color: "#245a5b",
-  metalness: 0.12,
-  roughness: 0.38
-});
-const subCircleMesh = new InstancedMesh(
-  subCircleGeometry,
-  subCircleMaterial,
-  subCircleCount
+const sphereLayerGeometry = new BufferGeometry();
+const sphereLayerPositions = new Float32Array(sphereLayerPointCount * 3);
+for (let index = 0; index < sphereLayerPointCount; index += 1) {
+  const y = 1 - 2 * (index + 0.5) / sphereLayerPointCount;
+  const ringRadius = Math.sqrt(1 - y ** 2);
+  const angle = index * goldenAngle;
+  const offset = index * 3;
+  sphereLayerPositions[offset] = Math.cos(angle) * ringRadius * sphereRadius;
+  sphereLayerPositions[offset + 1] = y * sphereRadius;
+  sphereLayerPositions[offset + 2] = Math.sin(angle) * ringRadius * sphereRadius;
+}
+sphereLayerGeometry.setAttribute(
+  "position",
+  new Float32BufferAttribute(sphereLayerPositions, 3)
 );
-subCircleMesh.renderOrder = 4;
+sphereLayerGeometry.computeBoundingSphere();
+const sphereLayerSurfaceArea = 4 * Math.PI * sphereRadius ** 2;
+const sphereLayerPointDiameter = Math.sqrt(
+  (2 * sphereLayerSurfaceArea) / (Math.sqrt(3) * sphereLayerPointCount)
+) * 2.5;
 const outerLayerGeometry = new BufferGeometry();
 const outerLayerPositions = new Float32Array(outerLayerPointCount * 3);
 const innerCircleCosAngle = outerLayerCircles[0].cosAngle;
@@ -172,6 +170,33 @@ const outerLayerCircleTexture = new CanvasTexture(outerLayerCircleCanvas);
 outerLayerCircleTexture.generateMipmaps = false;
 outerLayerCircleTexture.minFilter = LinearFilter;
 outerLayerCircleTexture.magFilter = LinearFilter;
+const sphereLayerMaterial = new PointsMaterial({
+  color: "#4ac3a6",
+  map: outerLayerCircleTexture,
+  size: sphereLayerPointDiameter,
+  sizeAttenuation: true,
+  transparent: true,
+  opacity: 0.9,
+  alphaTest: 0.08
+});
+const sphereLayerPoints = new Points(sphereLayerGeometry, sphereLayerMaterial);
+sphereLayerPoints.renderOrder = 5;
+const wallTipGeometry = new BufferGeometry();
+wallTipGeometry.setAttribute(
+  "position",
+  new Float32BufferAttribute(new Float32Array(wallCount * 3), 3)
+);
+const wallTipMaterial = new PointsMaterial({
+  color: "#ffe2a3",
+  map: outerLayerCircleTexture,
+  size: sphereLayerPointDiameter * 1.7,
+  sizeAttenuation: true,
+  transparent: true,
+  opacity: 1,
+  alphaTest: 0.08
+});
+const wallTipPoints = new Points(wallTipGeometry, wallTipMaterial);
+wallTipPoints.renderOrder = 7;
 const outerLayerMaterial = new PointsMaterial({
   color: "#4ac3a6",
   map: outerLayerCircleTexture,
@@ -183,12 +208,7 @@ const outerLayerMaterial = new PointsMaterial({
 });
 const outerLayerPoints = new Points(outerLayerGeometry, outerLayerMaterial);
 outerLayerPoints.renderOrder = 6;
-const orientationMatrix = new Matrix4();
-const instanceMatrix = new Matrix4();
-const instanceQuaternion = new Quaternion();
-const instancePosition = new Vector3();
-const instanceScale = new Vector3(subCircleRadius, subCircleRadius, subCircleRadius);
-let subCircleCenters = [];
+let wallTipCenters = [];
 
 for (let index = 0; index < cellCount; index += 1) {
   const y = 1 - 2 * (index + 0.5) / cellCount;
@@ -292,8 +312,6 @@ function getCellVertex(normal, tangent, bitangent, point) {
   return vertex;
 }
 
-const cellBoundaryPositions = [];
-const seenCellEdges = new Set();
 for (let index = 0; index < cellCount; index += 1) {
   const normal = circleNormals[index];
   const tangent = circleTangents[index];
@@ -318,60 +336,15 @@ for (let index = 0; index < cellCount; index += 1) {
 
   const vertices = polygon.map((point) => getCellVertex(normal, tangent, bitangent, point));
   if (vertices.length < 3) throw new Error(`Spherical cell ${index} has fewer than three vertices`);
-  cellVertexCounts.push(vertices.length);
   cellPolygons.push(vertices.map((vertex) => vertex.position));
-  const color = index === featuredCircleIndex ? selectedCellColor : cellPalette[index % cellPalette.length];
-  const colorStart = cellColorPositions.length;
-  const center = circleCenters[index];
-
-  for (let vertexIndex = 0; vertexIndex < vertices.length; vertexIndex += 1) {
-    const first = vertices[vertexIndex];
-    const second = vertices[(vertexIndex + 1) % vertices.length];
-    for (const point of [center, first.position, second.position]) {
-      cellPositions.push(point.x, point.y, point.z);
-      const pointNormal = point.clone().normalize();
-      cellNormals.push(pointNormal.x, pointNormal.y, pointNormal.z);
-      cellColorPositions.push(color.r, color.g, color.b);
-    }
-
-    const edgeIds = [first.id, second.id].sort((left, right) => left - right);
-    const edgeKey = `${edgeIds[0]}:${edgeIds[1]}`;
-    cellEdgeUseCounts.set(edgeKey, (cellEdgeUseCounts.get(edgeKey) ?? 0) + 1);
-    if (!seenCellEdges.has(edgeKey)) {
-      seenCellEdges.add(edgeKey);
-      cellBoundaryPositions.push(
-        first.position.x, first.position.y, first.position.z,
-        second.position.x, second.position.y, second.position.z
-      );
-    }
-  }
-  cellColorRanges.push({ start: colorStart, count: cellColorPositions.length - colorStart });
 }
 
-const cellGeometry = new BufferGeometry();
-cellGeometry.setAttribute("position", new Float32BufferAttribute(cellPositions, 3));
-cellGeometry.setAttribute("normal", new Float32BufferAttribute(cellNormals, 3));
-cellGeometry.setAttribute("color", new Float32BufferAttribute(cellColorPositions, 3));
-cellGeometry.computeBoundingSphere();
-const cellBoundaryGeometry = new BufferGeometry();
-cellBoundaryGeometry.setAttribute(
-  "position",
-  new Float32BufferAttribute(cellBoundaryPositions, 3)
-);
-const cellBoundaryMaterial = new LineBasicMaterial({
-  color: "#091b20",
-  transparent: true,
-  opacity: 0.82,
-  depthWrite: false
-});
-const cellBoundaryMesh = new LineSegments(cellBoundaryGeometry, cellBoundaryMaterial);
-cellBoundaryMesh.renderOrder = 3;
 const innerCircleGeometry = new BufferGeometry();
 innerCircleGeometry.setAttribute("position", new Float32BufferAttribute(innerCirclePositions, 3));
 const wallGeometry = new BufferGeometry();
 wallGeometry.setAttribute(
   "position",
-  new Float32BufferAttribute(new Float32Array(wallCount * circleSegments * 18), 3)
+  new Float32BufferAttribute(new Float32Array(wallCount * circleSegments * 9), 3)
 );
 wallGeometry.setAttribute("color", new Float32BufferAttribute(wallColors, 3));
 
@@ -388,11 +361,11 @@ function updateWalls(parentIndex) {
   let vertexIndex = 0;
 
   for (let wallIndex = 0; wallIndex < wallCount; wallIndex += 1) {
-    const childIndex = wallChildIndices[wallIndex];
-    const middleWallCenter = subCircleCenters[childIndex];
+    const childIndex = wallTargetSampleIndices[wallIndex];
+    const layer3CircleCenter = wallTipCenters[wallIndex];
 
-    if (childIndex === sampleSubCircleIndex) {
-      focusedPair = { innerWallCenter, middleWallCenter };
+    if (childIndex === sampleWallTargetIndex) {
+      focusedPair = { innerWallCenter, layer3CircleCenter };
     }
     const wallColor = wallPalette[wallIndex % wallPalette.length];
 
@@ -405,14 +378,7 @@ function updateWalls(parentIndex) {
       const innerEnd = innerWallCenter.clone()
         .addScaledVector(tangent, Math.cos(endAngle) * innerCircleRadius)
         .addScaledVector(bitangent, Math.sin(endAngle) * innerCircleRadius);
-      const middleStart = middleWallCenter.clone()
-        .addScaledVector(tangent, Math.cos(startAngle) * subCircleRadius)
-        .addScaledVector(bitangent, Math.sin(startAngle) * subCircleRadius);
-      const middleEnd = middleWallCenter.clone()
-        .addScaledVector(tangent, Math.cos(endAngle) * subCircleRadius)
-        .addScaledVector(bitangent, Math.sin(endAngle) * subCircleRadius);
-
-      for (const point of [innerStart, middleStart, middleEnd, innerStart, middleEnd, innerEnd]) {
+      for (const point of [innerStart, layer3CircleCenter, innerEnd]) {
         positionAttribute.setXYZ(vertexIndex, point.x, point.y, point.z);
         colorAttribute.setXYZ(vertexIndex, wallColor.r, wallColor.g, wallColor.b);
         vertexIndex += 1;
@@ -426,28 +392,12 @@ function updateWalls(parentIndex) {
   return focusedPair;
 }
 
-function setCellColor(index, color) {
-  const range = cellColorRanges[index];
-  const colors = cellGeometry.attributes.color.array;
-  for (let offset = range.start; offset < range.start + range.count; offset += 3) {
-    colors[offset] = color.r;
-    colors[offset + 1] = color.g;
-    colors[offset + 2] = color.b;
-  }
-}
-
 function updateFeaturedCircle(index) {
   featuredCircleIndex = index;
   const center = circleCenters[index];
   const normal = circleNormals[index];
   const tangent = circleTangents[index];
   const bitangent = circleBitangents[index];
-  if (previousFeaturedCellIndex !== null) {
-    setCellColor(previousFeaturedCellIndex, cellPalette[previousFeaturedCellIndex % cellPalette.length]);
-  }
-  setCellColor(index, selectedCellColor);
-  cellGeometry.attributes.color.needsUpdate = true;
-  previousFeaturedCellIndex = index;
 
   const polygon = cellPolygons[index].map((vertex) => {
     const direction = vertex.clone().normalize();
@@ -467,29 +417,59 @@ function updateFeaturedCircle(index) {
     triangles.push({ first, second, cumulativeArea: totalArea });
   }
 
-  orientationMatrix.makeBasis(tangent, bitangent, normal);
-  instanceQuaternion.setFromRotationMatrix(orientationMatrix);
-  subCircleCenters = [];
-  for (let subCircleIndex = 0; subCircleIndex < subCircleCount; subCircleIndex += 1) {
-    const triangleAreaTarget = radicalInverse(subCircleIndex + 1, 2) * totalArea;
+  const targets = wallTargetSampleIndices.map((sampleIndex) => {
+    const triangleAreaTarget = radicalInverse(sampleIndex + 1, 2) * totalArea;
     const triangle = triangles.find((item) => item.cumulativeArea >= triangleAreaTarget);
-    const radialSample = Math.sqrt(radicalInverse(subCircleIndex + 1, 3));
-    const edgeSample = radicalInverse(subCircleIndex + 1, 5);
+    if (!triangle) throw new Error("Unable to select a surface-circle target.");
+    const radialSample = Math.sqrt(radicalInverse(sampleIndex + 1, 3));
+    const edgeSample = radicalInverse(sampleIndex + 1, 5);
     const margin = 0.96;
     const u = margin * radialSample
       * ((1 - edgeSample) * triangle.first.u + edgeSample * triangle.second.u);
     const v = margin * radialSample
       * ((1 - edgeSample) * triangle.first.v + edgeSample * triangle.second.v);
-    instancePosition.copy(center)
+    return center.clone()
       .addScaledVector(tangent, u)
       .addScaledVector(bitangent, v)
-      .addScaledVector(normal, subCircleOffset);
-    subCircleCenters.push(instancePosition.clone());
-    instanceMatrix.compose(instancePosition, instanceQuaternion, instanceScale);
-    subCircleMesh.setMatrixAt(subCircleIndex, instanceMatrix);
+      .addScaledVector(normal, wallTipOffset);
+  });
+  const selectedPointIndices = new Set();
+  wallTipCenters = [];
+  for (let wallIndex = 0; wallIndex < targets.length; wallIndex += 1) {
+    const target = targets[wallIndex];
+    let nearestPointIndex = -1;
+    let nearestDistanceSquared = Infinity;
+    for (let pointIndex = 0; pointIndex < sphereLayerPointCount; pointIndex += 1) {
+      if (selectedPointIndices.has(pointIndex)) continue;
+      const offset = pointIndex * 3;
+      const dx = sphereLayerPositions[offset] - target.x;
+      const dy = sphereLayerPositions[offset + 1] - target.y;
+      const dz = sphereLayerPositions[offset + 2] - target.z;
+      const distanceSquared = dx * dx + dy * dy + dz * dz;
+      if (distanceSquared < nearestDistanceSquared) {
+        nearestDistanceSquared = distanceSquared;
+        nearestPointIndex = pointIndex;
+      }
+    }
+    if (nearestPointIndex < 0) throw new Error("Unable to find a Layer 3 surface circle.");
+    selectedPointIndices.add(nearestPointIndex);
+    const offset = nearestPointIndex * 3;
+    const pointCenter = new Vector3(
+      sphereLayerPositions[offset],
+      sphereLayerPositions[offset + 1],
+      sphereLayerPositions[offset + 2]
+    );
+    const pointNormal = pointCenter.clone().normalize();
+    wallTipCenters.push(pointCenter.addScaledVector(pointNormal, wallTipOffset));
+    wallTipGeometry.attributes.position.setXYZ(
+      wallIndex,
+      sphereLayerPositions[offset],
+      sphereLayerPositions[offset + 1],
+      sphereLayerPositions[offset + 2]
+    );
   }
-  subCircleMesh.instanceMatrix.needsUpdate = true;
-  subCircleMesh.computeBoundingSphere();
+  wallTipGeometry.attributes.position.needsUpdate = true;
+  wallTipGeometry.computeBoundingSphere();
   return updateWalls(index);
 }
 
@@ -541,13 +521,13 @@ function animateFocus(controls, target, position, restoreOverview = false) {
 }
 
 function focusCircle(index, controls, aspect) {
-  const { innerWallCenter, middleWallCenter } = updateFeaturedCircle(index);
+  const { innerWallCenter, layer3CircleCenter } = updateFeaturedCircle(index);
   const verticalHalfFov = (controls.object.fov * Math.PI) / 360;
   const horizontalHalfFov = Math.atan(Math.tan(verticalHalfFov) * aspect);
   const narrowHalfFov = Math.min(verticalHalfFov, horizontalHalfFov);
-  const wallLength = innerWallCenter.distanceTo(middleWallCenter);
+  const wallLength = innerWallCenter.distanceTo(layer3CircleCenter);
   const focusDistance = wallLength / (2 * Math.tan(narrowHalfFov) * 0.82);
-  const target = innerWallCenter.clone().add(middleWallCenter).multiplyScalar(0.5);
+  const target = innerWallCenter.clone().add(layer3CircleCenter).multiplyScalar(0.5);
   const position = target.clone()
     .addScaledVector(circleNormals[index], focusDistance)
     .addScaledVector(circleTangents[index], focusDistance * 0.35);
@@ -604,16 +584,15 @@ onBeforeUnmount(() => {
     gsap.killTweensOf(controls.object.position);
     gsap.killTweensOf(controls.target);
   }
-  cellGeometry.dispose();
-  cellBoundaryGeometry.dispose();
-  cellBoundaryMaterial.dispose();
   outerLayerGeometry.dispose();
+  sphereLayerGeometry.dispose();
+  wallTipGeometry.dispose();
   outerLayerCircleTexture.dispose();
+  sphereLayerMaterial.dispose();
+  wallTipMaterial.dispose();
   outerLayerMaterial.dispose();
   innerCircleGeometry.dispose();
   wallGeometry.dispose();
-  subCircleGeometry.dispose();
-  subCircleMaterial.dispose();
 });
 </script>
 
@@ -644,7 +623,7 @@ onBeforeUnmount(() => {
       <div>
         <p class="scene-eyebrow">SPHERICAL GRID / 001</p>
         <h2>Great-thousand-fold world</h2>
-        <p class="scene-description">Layer 1 is the central sphere; Layer 2 has the inner circles; Layer 3 has 1,000 polygon cells; Layer 4 shows 1M points inside the large ring, including 1K inside the small ring.</p>
+        <p class="scene-description">Layer 1 is the central sphere; Layer 2 has the inner circles; Layer 3 has 1M uniformly distributed surface rings with a yellow circle around 1K; Layer 4 shows 1M points inside the large ring, including 1K inside the small ring.</p>
       </div>
       <div class="scene-heading-meta">
         <div class="cell-counter"><strong>7</strong><span>RANDOM WALLS</span></div>
@@ -679,17 +658,18 @@ onBeforeUnmount(() => {
               :roughness="0.28"
             />
           </TresMesh>
-          <TresMesh :geometry="cellGeometry" :render-order="2">
-            <TresMeshBasicMaterial
-              :vertex-colors="true"
-              :side="2"
-              :transparent="true"
-              :opacity="0"
-              :depth-write="false"
+          <primitive :object="sphereLayerPoints" />
+          <primitive :object="wallTipPoints" />
+          <TresMesh
+            :position="[0, sphereLayerRing.y, 0]"
+            :rotation="[Math.PI / 2, 0, 0]"
+            :render-order="6.5"
+          >
+            <TresTorusGeometry
+              :args="[sphereLayerRing.radius, sphereLayerRing.tubeRadius, 8, 128]"
             />
+            <TresMeshBasicMaterial color="#ffe2a3" :side="2" />
           </TresMesh>
-          <primitive :object="cellBoundaryMesh" />
-          <primitive :object="subCircleMesh" />
           <TresMesh :geometry="wallGeometry" :render-order="4.75">
             <TresMeshBasicMaterial
               color="#ffffff"
