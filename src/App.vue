@@ -1,20 +1,16 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref } from "vue";
-import Life from "./pages/Life.vue";
 import World from "./pages/World.vue";
 import OrbitalScene from "./pages/OrbitalScene.vue";
 
 const pages = [
   { id: "scene", label: "World", href: "/#scene" },
-  { id: "orbital", label: "Orbital Resonance", href: "/#orbital" },
-  { id: "life", label: "Life", href: "/#life" }
+  { id: "orbital", label: "Orbital Resonance", href: "/#orbital" }
 ];
 
 const currentPage = ref(resolvePage(window.location.pathname, window.location.hash));
 
 function resolvePage(pathname, hash) {
-  if (pathname.replace(/\/+$/, "") === "/life") return "life";
-
   const id = hash.replace(/^#/, "").trim().toLowerCase();
   return pages.some((page) => page.id === id) ? id : "orbital";
 }
@@ -53,7 +49,6 @@ onBeforeUnmount(() => {
     </header>
 
     <OrbitalScene v-if="currentPage === 'orbital'" />
-    <World v-else-if="currentPage === 'scene'" />
-    <Life v-else />
+    <World v-else />
   </main>
 </template>
