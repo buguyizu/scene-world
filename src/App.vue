@@ -5,14 +5,14 @@ import OrbitalScene from "./pages/OrbitalScene.vue";
 
 const pages = [
   { id: "scene", label: "World", href: "/#scene" },
-  { id: "orbital", label: "Orbital Resonance", href: "/#orbital" }
+  { id: "seed", label: "World Seed", href: "/#seed" }
 ];
 
 const currentPage = ref(resolvePage(window.location.pathname, window.location.hash));
 
 function resolvePage(pathname, hash) {
   const id = hash.replace(/^#/, "").trim().toLowerCase();
-  return pages.some((page) => page.id === id) ? id : "orbital";
+  return pages.some((page) => page.id === id) ? id : "seed";
 }
 
 function syncPageFromLocation() {
@@ -34,7 +34,7 @@ onBeforeUnmount(() => {
 <template>
   <main class="app-shell">
     <header class="app-header">
-      <a class="app-brand" href="/#orbital">SCENE-WORLD</a>
+      <a class="app-brand" href="/#seed">SCENE-WORLD</a>
       <nav class="page-nav" aria-label="World pages">
         <a
           v-for="page in pages"
@@ -48,7 +48,7 @@ onBeforeUnmount(() => {
       </nav>
     </header>
 
-    <OrbitalScene v-if="currentPage === 'orbital'" />
+    <OrbitalScene v-if="currentPage === 'seed'" />
     <World v-else />
   </main>
 </template>
